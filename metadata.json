@@ -1,0 +1,7 @@
+{
+  "name": "Vue MediaPipe Worker",
+  "description": "A Vue3 TypeScript application running MediaPipe Gesture Recognizer in a Web Worker using a patched ESM bundle.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}

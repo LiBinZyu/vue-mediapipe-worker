@@ -260,8 +260,8 @@ body {
   width: 12px;
   height: 12px;
   /* High contrast for visibility */
-  border: 2px solid #ffffff;
-  background-color: rgba(255, 255, 255, 0.3);
+  border: 2px solid var(--primary-color);
+  background-color: rgba(255, 255, 255, 0.8);
   border-radius: 50%;
   pointer-events: none;
   z-index: 9999;
@@ -280,11 +280,11 @@ body {
 }
 
 .gesture-cursor.dragging {
-  border-color: #ffffff;
+  border: 3px solid var(--surface-color);
   width: 28px;
   height: 28px;
-  background: rgba(255, 255, 255, 0.15);
-  box-shadow: 0 0 15px rgba(255, 255, 255, 0.4);
+  background: rgba(255, 255, 255, 0.1);
+  box-shadow: 0 0 15px rgba(0, 0, 0, 0.4);
 }
 
 /* Debug / Cam Video Styling */

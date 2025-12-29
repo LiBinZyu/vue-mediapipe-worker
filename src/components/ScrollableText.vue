@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed } from 'vue';
+import { useDragScroll } from '../composables/useDragScroll';
 
 const props = defineProps<{
   visible: boolean;
@@ -7,101 +8,21 @@ const props = defineProps<{
 
 const containerRef = ref<HTMLDivElement | null>(null);
 const contentRef = ref<HTMLDivElement | null>(null);
-const scrollTop = ref(0);
-const maxScroll = ref(0);
 
-// Physics State
-let velocity = 0;
-let lastY = 0;
-let isDragging = false;
-let animationFrame = 0;
+// Shared Drag Logic
+const { onStartDrag } = useDragScroll(containerRef);
 
 const style = computed(() => ({
   transform: props.visible ? 'translateX(0) translateY(-50%)' : 'translateX(100%) translateY(-50%)',
-  opacity: props.visible ? 1 : 0
+  opacity: props.visible ? 1 : 0,
+  // Ensure native scrolling works
+  overflowY: 'auto' as 'auto', // or 'hidden' if we want to hide scrollbar but allow drag
+  // Using auto allows wheel support natively
 }));
-
-const contentStyle = computed(() => ({
-  transform: `translateY(${-scrollTop.value}px)`
-}));
-
-onMounted(() => {
-  // Slight delay to ensure layout is ready
-  setTimeout(updateMaxScroll, 100);
-  window.addEventListener('resize', updateMaxScroll);
-  window.addEventListener('mouseup', onStopDrag);
-  window.addEventListener('mousemove', onDragMove);
-});
-
-onUnmounted(() => {
-  window.removeEventListener('resize', updateMaxScroll);
-  window.removeEventListener('mouseup', onStopDrag);
-  window.removeEventListener('mousemove', onDragMove);
-  if (animationFrame) cancelAnimationFrame(animationFrame);
-});
-
-const updateMaxScroll = () => {
-    if (containerRef.value && contentRef.value) {
-        maxScroll.value = Math.max(0, contentRef.value.scrollHeight - containerRef.value.clientHeight);
-    }
-}
-
-// ---- Standard Mouse Events (Works with Real Mouse AND Gesture Bridge) ----
-
-const onStartDrag = (e: MouseEvent) => {
-    isDragging = true;
-    lastY = e.clientY;
-    velocity = 0;
-    if (animationFrame) cancelAnimationFrame(animationFrame);
-    e.preventDefault(); // Prevent text selection
-};
-
-const onDragMove = (e: MouseEvent) => {
-    if (!isDragging) return;
-    
-    const dy = e.clientY - lastY;
-    scrollTop.value -= dy; // 1:1 movement
-    velocity = -dy; // Store velocity
-    
-    // Clamp
-    scrollTop.value = Math.max(0, Math.min(scrollTop.value, maxScroll.value));
-    
-    lastY = e.clientY;
-};
-
-const onStopDrag = () => {
-    if (isDragging) {
-        isDragging = false;
-        requestAnimationFrame(momentumLoop);
-    }
-};
-
-const momentumLoop = () => {
-  if (isDragging) return; 
-  if (Math.abs(velocity) < 0.1) return;
-
-  scrollTop.value += velocity;
-  velocity *= 0.95; // Friction
-
-  // Bounce / Clamp
-  if (scrollTop.value < 0) {
-    scrollTop.value = 0;
-    velocity = 0;
-  } else if (scrollTop.value > maxScroll.value) {
-    scrollTop.value = maxScroll.value;
-    velocity = 0;
-  }
-
-  animationFrame = requestAnimationFrame(momentumLoop);
-};
 
 const onWheel = (e: WheelEvent) => {
-    scrollTop.value += e.deltaY;
-    scrollTop.value = Math.max(0, Math.min(scrollTop.value, maxScroll.value));
-    velocity = 0; // Stop momentum on wheel
-    e.preventDefault();
+    // Native scroll handles this if overflow is auto
 }
-
 </script>
 
 <template>
@@ -111,8 +32,10 @@ const onWheel = (e: WheelEvent) => {
     :style="style"
     @mousedown="onStartDrag"
     @wheel="onWheel"
+    style="cursor: grab;"
   >
-    <div ref="contentRef" class="scrollable-text-content" :style="contentStyle">
+    <!-- Content wrapper no longer needs transform, just flow -->
+    <div ref="contentRef" class="scrollable-text-content">
       <h2>Scroll Control</h2>
       <p>
         The text panel you are reading demonstrates the <strong>Virtual Drag</strong> capability.
@@ -134,4 +57,15 @@ const onWheel = (e: WheelEvent) => {
 
 <style scoped>
 /* Scoped styles removed. Using global style.css */
+.scrollable-text-container:active {
+    cursor: grabbing !important;
+}
+/* Hide scrollbar for cleaner look if desired, but 'auto' is safer for now */
+.scrollable-text-container::-webkit-scrollbar {
+  width: 6px;
+}
+.scrollable-text-container::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.2);
+  border-radius: 4px;
+}
 </style>

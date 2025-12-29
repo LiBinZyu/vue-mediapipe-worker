@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue';
 import { type GestureState } from '../composables/useGesture';
+import { useDragScroll } from '../composables/useDragScroll';
 
 interface Props {
   isCameraActive: boolean;
@@ -28,6 +29,11 @@ const selectedHand = ref<'Left' | 'Right' | 'Both'>('Both');
 const selectedSmoothing = ref<'Fast' | 'Balanced' | 'Smooth'>('Balanced');
 const selectedCamera = ref('');
 const cameraList = ref<MediaDeviceInfo[]>([]);
+
+// Drag Scroll for Developer Panel
+const devPanelRef = ref<HTMLElement | null>(null);
+const { onStartDrag: onDevPanelDrag } = useDragScroll(devPanelRef);
+
 
 // Initialize camera list
 navigator.mediaDevices?.enumerateDevices().then(devices => {
@@ -180,7 +186,18 @@ function getPolyPoints(indices: number[], landmarks: any[]) {
   </div>
 
   <!-- Consolidated Developer Mode Panel -->
-  <div v-if="debugMode" class="panel animate-enter" style="position:fixed; top:96px; left:24px; width:280px; max-height:calc(100vh - 120px); overflow-y:auto; display:flex; flex-direction:column; gap:16px; z-index:40; padding:16px;">
+  <div 
+    v-if="debugMode" 
+    ref="devPanelRef"
+    @mousedown="onDevPanelDrag"
+    class="panel animate-enter" 
+    style="
+        position:fixed; top:96px; left:24px; width:280px; max-height:calc(100vh - 120px); 
+        overflow-y:auto; display:flex; flex-direction:column; gap:16px; z-index:40; padding:16px;
+        cursor: grab;
+    "
+    :class="{ 'dragging': false /* Placeholder for active state styling if needed */ }"
+  >
         
         <!-- Section 1: Classification -->
          <div>
@@ -312,4 +329,8 @@ function getPolyPoints(indices: number[], landmarks: any[]) {
 
 <style scoped>
 /* Reliance on global style.css */
+/* Styles for dragging cursor are inline mostly or handled by global class if needed */
+.panel:active {
+  cursor: grabbing !important;
+}
 </style>

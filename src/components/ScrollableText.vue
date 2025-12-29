@@ -1,9 +1,7 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from 'vue';
-import type { GestureState } from '../composables/useGesture';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 
 const props = defineProps<{
-  gestureState: GestureState;
   visible: boolean;
 }>();
 
@@ -12,14 +10,14 @@ const contentRef = ref<HTMLDivElement | null>(null);
 const scrollTop = ref(0);
 const maxScroll = ref(0);
 
-// Smooth scrolling physics
+// Physics State
 let velocity = 0;
 let lastY = 0;
 let isDragging = false;
 let animationFrame = 0;
 
 const style = computed(() => ({
-  transform: props.visible ? 'translateX(0)' : 'translateX(100%)',
+  transform: props.visible ? 'translateX(0) translateY(-50%)' : 'translateX(100%) translateY(-50%)',
   opacity: props.visible ? 1 : 0
 }));
 
@@ -28,48 +26,58 @@ const contentStyle = computed(() => ({
 }));
 
 onMounted(() => {
-  if (containerRef.value && contentRef.value) {
-    maxScroll.value = Math.max(0, contentRef.value.scrollHeight - containerRef.value.clientHeight);
-  }
+  // Slight delay to ensure layout is ready
+  setTimeout(updateMaxScroll, 100);
+  window.addEventListener('resize', updateMaxScroll);
+  window.addEventListener('mouseup', onStopDrag);
+  window.addEventListener('mousemove', onDragMove);
 });
 
-// Watch for gesture updates
-watch(() => props.gestureState.cursor, (newVal) => {
-  if (!props.visible || !containerRef.value) return;
+onUnmounted(() => {
+  window.removeEventListener('resize', updateMaxScroll);
+  window.removeEventListener('mouseup', onStopDrag);
+  window.removeEventListener('mousemove', onDragMove);
+  if (animationFrame) cancelAnimationFrame(animationFrame);
+});
 
-  // Hit Test
-  const rect = containerRef.value.getBoundingClientRect();
-  const isInside = newVal.x >= rect.left && newVal.x <= rect.right && 
-                   newVal.y >= rect.top && newVal.y <= rect.bottom;
-
-  if (isInside && newVal.mode === 'drag') {
-    if (!isDragging) {
-      isDragging = true;
-      lastY = newVal.y;
-      velocity = 0;
+const updateMaxScroll = () => {
+    if (containerRef.value && contentRef.value) {
+        maxScroll.value = Math.max(0, contentRef.value.scrollHeight - containerRef.value.clientHeight);
     }
-    
-    // Drag logic (Direct Scroll)
-    const dy = newVal.y - lastY;
-    scrollTop.value -= dy * 2; // Multiplier for feel
-    
-    // Calculate velocity for inertia
-    velocity = -dy * 2;
-    lastY = newVal.y;
+}
 
+// ---- Standard Mouse Events (Works with Real Mouse AND Gesture Bridge) ----
+
+const onStartDrag = (e: MouseEvent) => {
+    isDragging = true;
+    lastY = e.clientY;
+    velocity = 0;
+    if (animationFrame) cancelAnimationFrame(animationFrame);
+    e.preventDefault(); // Prevent text selection
+};
+
+const onDragMove = (e: MouseEvent) => {
+    if (!isDragging) return;
+    
+    const dy = e.clientY - lastY;
+    scrollTop.value -= dy; // 1:1 movement
+    velocity = -dy; // Store velocity
+    
     // Clamp
     scrollTop.value = Math.max(0, Math.min(scrollTop.value, maxScroll.value));
-  } else {
+    
+    lastY = e.clientY;
+};
+
+const onStopDrag = () => {
     if (isDragging) {
-      isDragging = false;
-      // Start momentum
-      requestAnimationFrame(momentumLoop);
+        isDragging = false;
+        requestAnimationFrame(momentumLoop);
     }
-  }
-}, { deep: true });
+};
 
 const momentumLoop = () => {
-  if (isDragging) return; // Stop if grabbed again
+  if (isDragging) return; 
   if (Math.abs(velocity) < 0.1) return;
 
   scrollTop.value += velocity;
@@ -84,53 +92,46 @@ const momentumLoop = () => {
     velocity = 0;
   }
 
-  requestAnimationFrame(momentumLoop);
+  animationFrame = requestAnimationFrame(momentumLoop);
 };
+
+const onWheel = (e: WheelEvent) => {
+    scrollTop.value += e.deltaY;
+    scrollTop.value = Math.max(0, Math.min(scrollTop.value, maxScroll.value));
+    velocity = 0; // Stop momentum on wheel
+    e.preventDefault();
+}
 
 </script>
 
 <template>
-  <div ref="containerRef" class="scrollable-panel" :style="style">
-    <div ref="contentRef" class="scroll-content" :style="contentStyle">
-      <h2>Gesture Scrolling</h2>
-      <p v-for="i in 20" :key="i">
-        This is a scrollable text block item #{{ i }}. 
-        Use the "Pinch & Drag" gesture to scroll up and down.
-        Momentum scrolling is enabled for a smooth feel.
+  <div 
+    ref="containerRef" 
+    class="scrollable-text-container" 
+    :style="style"
+    @mousedown="onStartDrag"
+    @wheel="onWheel"
+  >
+    <div ref="contentRef" class="scrollable-text-content" :style="contentStyle">
+      <h2>Scroll Control</h2>
+      <p>
+        The text panel you are reading demonstrates the <strong>Virtual Drag</strong> capability.
       </p>
+      <p>
+        You can use your mouse to drag this text up and down, or use the <strong>Index Pinch</strong> gesture to grab the panel and scroll just like a touchscreen.
+      </p>
+      <hr style="border:0; border-top:1px solid var(--border-color); margin: 24px 0;" />
+      <div v-for="i in 10" :key="i">
+        <p>
+            <strong>Section {{ i }}</strong><br/>
+            This is additional content to demonstrate the scrolling physics. Momentum is calculated based on your throw speed.
+        </p>
+      </div>
+       <p style="opacity:0.5; font-size:0.8rem; margin-top:24px;">End of content.</p>
     </div>
   </div>
 </template>
 
 <style scoped>
-.scrollable-panel {
-  position: fixed;
-  right: 0;
-  top: 0;
-  bottom: 0;
-  width: 300px;
-  background: rgba(20, 20, 20, 0.95);
-  border-left: 1px solid rgba(255, 255, 255, 0.1);
-  padding: 20px;
-  transition: transform 0.3s cubic-bezier(0.4, 0.0, 0.2, 1), opacity 0.3s;
-  overflow: hidden;
-  z-index: 100;
-  color: #eee;
-}
-
-.scroll-content {
-  will-change: transform;
-}
-
-h2 {
-  margin-top: 0;
-  color: var(--primary-color, #646cff);
-}
-
-p {
-  margin-bottom: 1em;
-  line-height: 1.6;
-  font-size: 0.95rem;
-  color: rgba(255,255,255,0.7);
-}
+/* Scoped styles removed. Using global style.css */
 </style>

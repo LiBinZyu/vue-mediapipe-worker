@@ -1,56 +1,38 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 
-const props = defineProps<{
+interface Props {
   x: number;
   y: number;
-  mode: 'none' | 'click' | 'drag' | 'scroll' | 'rotate';
-  active: boolean; // Is hand detected?
-  mouseActive: boolean; // Is real mouse moving?
-}>();
+  mode: 'none' | 'click' | 'drag' | 'rotate' | 'scroll';
+  active: boolean; // active means hand is detected
+  mouseActive: boolean;
+}
 
-const style = computed(() => ({
+const props = defineProps<Props>();
+
+const cursorStyle = computed(() => ({
   left: `${props.x}px`,
   top: `${props.y}px`,
-  display: (props.active && !props.mouseActive) ? 'block' : 'none'
+  // If active (hand detected), show it. 
+  // If mouse is moving, maybe fade it but don't hide completely to avoid "disappearing" confusion unless requested.
+  // User reported "cannot be seen". Let's force visibility if active.
+  opacity: props.active ? 1 : 0, 
+  // If we want to hide when mouse is moving:
+  // opacity: props.active && !props.mouseActive ? 1 : (props.active ? 0.5 : 0)
+}));
+
+const cursorClass = computed(() => ({
+  'gesture-cursor': true,
+  'clicking': props.mode === 'click' || props.mode === 'drag', 
+  'dragging': props.mode === 'drag' || props.mode === 'rotate' 
 }));
 </script>
 
 <template>
-  <div class="gesture-cursor" :class="[mode]" :style="style"></div>
+  <div :style="cursorStyle" :class="cursorClass"></div>
 </template>
 
 <style scoped>
-.gesture-cursor {
-  position: fixed;
-  width: 12px;
-  height: 12px;
-  border: 2px solid var(--primary-color);
-  border-radius: 50%;
-  pointer-events: none;
-  z-index: 9999;
-  transform: translate(-50%, -50%);
-  transition: width 0.1s, height 0.1s, background-color 0.1s;
-  box-shadow: 0 0 15px var(--primary-color);
-  background: transparent;
-}
-
-.gesture-cursor.click {
-  background: var(--primary-color);
-  width: 8px;
-  height: 8px;
-}
-
-.gesture-cursor.drag, .gesture-cursor.scroll, .gesture-cursor.rotate {
-  border-color: white;
-  width: 24px;
-  height: 24px;
-  background: rgba(255, 255, 255, 0.1);
-}
-
-.gesture-cursor.rotate {
-  border-color: #ffd700;
-  border-radius: 30%;
-}
-
+/* Scoped styles removed/minimal since we use global. */
 </style>

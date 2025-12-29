@@ -1,13 +1,30 @@
-import { ref, onUnmounted, type Ref } from 'vue';
-import type { LogEntry, GestureResult, WorkerMessage } from '../types';
+import { ref, onUnmounted, reactive } from 'vue';
+import type { LogEntry, WorkerMessage } from '../types';
 
 // Web Worker import for Vite
 // Web Worker import removed in favor of Blob approach
-// import GestureWorker from '../worker/gesture.worker?worker';
+
+type GestureMode = 'none' | 'click' | 'drag' | 'rotate' | 'scroll';
+type HandPreference = 'Left' | 'Right' | 'Both';
+type SmoothingProfile = 'Fast' | 'Balanced' | 'Smooth';
 
 export interface GestureState {
-    cursor: { x: number; y: number; active: boolean; mode: 'none' | 'click' | 'drag' | 'rotate' | 'scroll' };
+    cursor: {
+        x: number;
+        y: number;
+        active: boolean;
+        mode: GestureMode
+    };
     gestures: string[]; // e.g. "Thumb_Up", "Open_Palm"
+    events: Record<string, boolean>; // 'CLICK': true
+    debugInfo: {
+        rootPos: { x: number; y: number };
+        handScale: number;
+        roi: number; // Base ROI
+        effectiveRoi: number; // Dynamic ROI
+        landmarks: { x: number; y: number; z: number }[];
+        handedness: string;
+    };
 }
 
 export function useGesture() {
@@ -23,11 +40,36 @@ export function useGesture() {
     const isBusyRef = ref(false);
     const requestRef = ref<number | null>(null);
 
+    // Configuration
+    const config = reactive({
+        hand: 'Both' as HandPreference,
+        smoothing: 'Balanced' as SmoothingProfile,
+        roi: 0.8,
+        videoSource: '' as string
+    });
+
     // Gesture State for UI
     const gestureState = ref<GestureState>({
         cursor: { x: 0, y: 0, active: false, mode: 'none' },
-        gestures: []
+        gestures: [],
+        events: {},
+        debugInfo: {
+            rootPos: { x: 0, y: 0 },
+            handScale: 1,
+            roi: 0.8,
+            effectiveRoi: 0.8,
+            landmarks: [],
+            handedness: 'Unknown'
+        }
     });
+
+    // Helper: Smoothing Buffer
+    const positionBuffer: { x: number, y: number }[] = [];
+    const BUFFER_SIZE_MAP = {
+        'Fast': 2,
+        'Balanced': 5,
+        'Smooth': 10
+    };
 
     const addLog = (message: string, type: LogEntry['type'] = 'info') => {
         const timestamp = new Date().toLocaleTimeString();
@@ -44,14 +86,14 @@ export function useGesture() {
       if (!mp && typeof $mediapipe !== 'undefined') mp = $mediapipe;
       if (!mp) throw new Error("MediaPipe library not found in worker scope. ensure mediapipe.js is loaded.");
 
-      // Use a consistent WASM URL or the one found in the original app
+      // Offline / Local Assets
       const vision = await mp.FilesetResolver.forVisionTasks(
-        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.9/wasm"
+        config.wasmBase 
       );
 
       gestureRecognizer = await mp.GestureRecognizer.createFromOptions(vision, {
         baseOptions: {
-          modelAssetPath: "https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task",
+          modelAssetPath: config.modelPath,
           delegate: config.delegate || "CPU" 
         },
         runningMode: "VIDEO",
@@ -79,7 +121,6 @@ export function useGesture() {
       const simpleResult = {
         landmarks: result ? result.landmarks : [],
         gestures: result && result.gestures ? result.gestures.map(cats => ({ categories: cats })) : [],
-        // Handle loose typings for handedness
         handednesses: result ? (result.handednesses || result.handedness) : []
       };
 
@@ -155,8 +196,16 @@ export function useGesture() {
                 useGPU = !!gl;
             } catch (e) { useGPU = false; }
 
+            const baseUrl = window.location.origin;
             const delegate = useGPU ? 'GPU' : 'CPU';
-            worker.postMessage({ type: 'init', payload: { delegate } });
+            worker.postMessage({
+                type: 'init',
+                payload: {
+                    delegate,
+                    wasmBase: `${baseUrl}/libs`,
+                    modelPath: `${baseUrl}/models/gesture_recognizer.task`
+                }
+            });
 
         } catch (err: any) {
             addLog(`Setup Error: ${err.message}`, 'error');
@@ -175,58 +224,238 @@ export function useGesture() {
         }
     };
 
-    const handleResult = (result: GestureResult | null) => {
-        if (!result || !canvasRef.value) return;
+    // State Machine Variables
+    const STATE = {
+        lastPinchTime: 0,
+        clickCount: 0,
+        clickTimer: null as ReturnType<typeof setTimeout> | null,
+        dragStartTime: 0,
+        isDragging: false,
+        isMiddleDragging: false,
+        lastPosition: { x: 0, y: 0 }
+    };
 
-        // Draw landmarks (Basic debug drawing)
-        const ctx = canvasRef.value.getContext('2d');
-        if (ctx) {
-            ctx.clearRect(0, 0, canvasRef.value.width, canvasRef.value.height);
-            // We can implement drawing here or import from utils
-            // For now, let's just focus on logic
-            if (result.landmarks && result.landmarks.length > 0) {
-                // Drawing logic can be added here if needed
-            }
+    const handleResult = (result: any) => {
+        if (!result) return;
+        const now = performance.now();
+
+        // Standardized Reset
+        const resetState = () => {
+            gestureState.value.cursor.active = false;
+            gestureState.value.gestures = [];
+            // Keep last known events for a frame? No, instant feedback.
+            gestureState.value.events = { 'IDLE': true };
+            gestureState.value.debugInfo.landmarks = [];
         }
 
-        // Process Gestures for State
-        if (result.landmarks && result.landmarks.length > 0) {
-            const hand = result.landmarks[0]; // Primary hand
-            // Normalize coordinates (0-1) to screen space
-            // Hand landmark 8 is Index Tip, 4 is Thumb Tip.
-            // We can use 9 (Middle Finger MCP) or a robust point for cursor.
-            // Usually Index Tip (8) is good for pointing, or a centroid.
+        // Reset if no hands
+        if (!result.landmarks || result.landmarks.length === 0) {
+            resetState();
+            return;
+        }
 
-            const indexTip = hand[8];
-            if (indexTip) {
-                // Mirror X for intuitive control? Webcam is usually mirrored.
-                // If we draw mirrored, we should also track mirrored.
-                const x = 1 - indexTip.x;
-                const y = indexTip.y;
+        // 1. Hand Filtering & Selection
+        let targetHandIndex = -1;
+        const hands = result.landmarks;
+        const handednesses = result.handednesses;
 
-                gestureState.value.cursor.x = x * window.innerWidth;
-                gestureState.value.cursor.y = y * window.innerHeight;
-                gestureState.value.cursor.active = true;
+        if (config.hand !== 'Both') {
+            // Strict Mode: Look for specific hand
+            const correctIndex = handednesses.findIndex((h: any) => {
+                const label = h[0]?.categoryName;
+                return label === config.hand; // 'Left' or 'Right'
+            });
+
+            if (correctIndex !== -1) {
+                targetHandIndex = correctIndex;
+            } else {
+                // Desired hand not found. Ignore other hands.
+                resetState();
+                return;
+            }
+        } else {
+            // Both allowed, default to first (primary)
+            targetHandIndex = 0;
+        }
+
+        if (targetHandIndex === -1 || !hands[targetHandIndex]) {
+            resetState();
+            return;
+        }
+
+        const hand = hands[targetHandIndex];
+        const handednessObj = handednesses[targetHandIndex];
+        const handLabel = handednessObj && handednessObj[0] ? handednessObj[0].categoryName : 'Unknown';
+
+        // Debug Info / ROI
+        const root = hand[0]; // Wrist
+        // Z-depth scale calculation
+        // Wrist z is relative to image plane. 
+        // We want effective ROI to shrink as hand moves away (Z decreases/becomes smaller).
+        // Actually Z is usually 0 at wrist in World landmarks, but in Normalized landmarks it's relative?
+        // Wait, recognizeForVideo returns Normalized landmarks (x,y,z). Z is relative to wrist depth logic usually.
+        // Let's use simple scale: Hand Scale.
+        // Distance Wrist(0) to MiddleMCP(9)
+        const wristToMiddle = Math.sqrt(Math.pow(root.x - hand[9].x, 2) + Math.pow(root.y - hand[9].y, 2));
+        // typical size ~ 0.15 (Close) to 0.05 (Far)
+
+        let roiScaleFactor = 1.0;
+        // If hand is small (far), effective ROI should be small to allow reaching corners.
+        // ROI size = BaseROI * (HandSize / RefSize) ? 
+        // No, User said: "Z used to dynamically change ROI box... hand far -> ROI small"
+        // We can just us a linear map based on handSize.
+        // Let's map handSize 0.05 -> ROI 0.3, handSize 0.2 -> ROI 0.8
+
+        // Using Wrist Z if available? In Normalized landmarks, Z is approximate.
+        // Let's trust handSize (0->9 distance) as proxy for distance.
+        const refSize = 0.10; // "Normal" distance size
+        const distFactor = wristToMiddle / refSize;
+
+        // Effective ROI
+        let effRoi = config.roi * Math.min(1.2, Math.max(0.5, distFactor));
+        // Cap
+        if (effRoi > 1.0) effRoi = 1.0;
+
+        const newDebugInfo = {
+            rootPos: { x: root.x, y: root.y },
+            handScale: wristToMiddle,
+            roi: config.roi,
+            effectiveRoi: effRoi,
+            landmarks: hand,
+            handedness: handLabel
+        };
+        gestureState.value.debugInfo = newDebugInfo;
+
+
+        // 2. Cursor Mapping
+        const indexTip = hand[8];
+        if (indexTip) {
+            // Mirroring: If camera is mirrored, x is 1-x.
+            // Usually local webcam is mirrored.
+            let rawX = 1 - indexTip.x;
+            let rawY = indexTip.y;
+
+            // Apply ROI Scaling
+            // Center is (0.5, 0.5).
+            // Map (0.5 - ROI/2) -> 0, (0.5 + ROI/2) -> 1
+            const roiHalf = effRoi / 2;
+            const roiMinX = 0.5 - roiHalf;
+            const roiMinY = 0.5 - roiHalf;
+
+            let mappedX = (rawX - roiMinX) / effRoi;
+            let mappedY = (rawY - roiMinY) / effRoi;
+
+            // Clamp
+            mappedX = Math.max(0, Math.min(1, mappedX));
+            mappedY = Math.max(0, Math.min(1, mappedY));
+
+            // Smoothing
+            const bufferSize = BUFFER_SIZE_MAP[config.smoothing] || 5;
+            positionBuffer.push({ x: mappedX, y: mappedY });
+            if (positionBuffer.length > bufferSize) positionBuffer.shift();
+
+            const avgX = positionBuffer.reduce((sum, p) => sum + p.x, 0) / positionBuffer.length;
+            const avgY = positionBuffer.reduce((sum, p) => sum + p.y, 0) / positionBuffer.length;
+
+            gestureState.value.cursor.x = avgX * window.innerWidth;
+            gestureState.value.cursor.y = avgY * window.innerHeight;
+            gestureState.value.cursor.active = true;
+        }
+
+        // 3. Gesture State Machine
+        const thumbTip = hand[4];
+        const middleTip = hand[12];
+        const indexTipP = hand[8];
+
+        const distIndexThumb = calculateDistance(indexTipP, thumbTip);
+        const distMiddleThumb = calculateDistance(middleTip, thumbTip);
+
+        // Constants (normalized coords)
+        const PINCH_THRESH = 0.05;
+        const isPinch = distIndexThumb < PINCH_THRESH;
+        const isMiddlePinch = distMiddleThumb < PINCH_THRESH;
+
+        const currentEvents: Record<string, boolean> = {};
+
+        // Middle Pinch = Rotate logic
+        if (isMiddlePinch) {
+            if (!STATE.isMiddleDragging) {
+                currentEvents['DRAG_MIDDLE_START'] = true;
+                STATE.isMiddleDragging = true;
+            } else {
+                currentEvents['DRAG_MIDDLE_MOVE'] = true;
+            }
+            gestureState.value.cursor.mode = 'rotate';
+        } else {
+            // End Rotate
+            if (STATE.isMiddleDragging) {
+                currentEvents['DRAG_MIDDLE_END'] = true;
+                STATE.isMiddleDragging = false;
             }
 
-            // Check Pinches
-            const thumbTip = hand[4];
-            const middleTip = hand[12];
+            if (isPinch) {
+                // Index Pinch = Click / Drag
+                if (!STATE.isDragging) {
+                    if (STATE.dragStartTime === 0) STATE.dragStartTime = now;
 
-            const isIndexPinch = calculateDistance(indexTip, thumbTip) < 0.05; // Threshold
-            const isMiddlePinch = calculateDistance(middleTip, thumbTip) < 0.05;
-
-            if (isMiddlePinch) {
-                gestureState.value.cursor.mode = 'rotate'; // Middle Pinch -> Rotate
-            } else if (isIndexPinch) {
-                gestureState.value.cursor.mode = 'drag'; // Index Pinch -> Drag
+                    // 200ms hold -> Drag Start
+                    if (now - STATE.dragStartTime > 200) {
+                        STATE.isDragging = true;
+                        currentEvents['DRAG_START'] = true;
+                    }
+                } else {
+                    currentEvents['DRAG_MOVE'] = true;
+                    gestureState.value.cursor.mode = 'drag';
+                }
             } else {
+                // Release
+                if (STATE.isDragging) {
+                    currentEvents['DRAG_END'] = true;
+                    STATE.isDragging = false;
+                    STATE.dragStartTime = 0;
+                } else if (STATE.dragStartTime > 0) {
+                    // Short press logic
+                    STATE.dragStartTime = 0;
+
+                    // Double Click Detection
+                    STATE.clickCount++;
+                    if (STATE.clickCount === 1) {
+                        // Wait 300ms for second click
+                        STATE.clickTimer = setTimeout(() => {
+                            STATE.clickCount = 0;
+                            // Timeout -> Single Click confirmed (too late for double)
+                            // We can emit single click now? 
+                            // Or just emit CLICK on release for responsiveness, 
+                            // and DOUBLE_CLICK effectively fires two clicks + 1 double?
+                            // Standard UI: Click always fires. Double click fires after.
+                        }, 300);
+                        currentEvents['CLICK'] = true;
+                    } else {
+                        if (STATE.clickTimer) clearTimeout(STATE.clickTimer);
+                        STATE.clickCount = 0;
+                        currentEvents['DOUBLE_CLICK'] = true;
+                    }
+                }
                 gestureState.value.cursor.mode = 'none';
             }
-
-        } else {
-            gestureState.value.cursor.active = false;
         }
+
+        if (!isPinch && !isMiddlePinch && !STATE.isDragging && !STATE.isMiddleDragging) {
+            gestureState.value.cursor.mode = 'none';
+            if (gestureState.value.cursor.active) currentEvents['POINTER_MOVE'] = true;
+            else currentEvents['IDLE'] = true;
+        }
+
+        // Gesture Name (Classification)
+        const cats = result.gestures?.[targetHandIndex]?.categories;
+        const gestureName = cats && cats.length > 0 ? cats[0].categoryName : 'None';
+        gestureState.value.gestures = [gestureName];
+
+        gestureState.value.events = currentEvents;
+
+        // Pass to Global Event Bridge
+        // We will implement this in `App.vue` watcher or a utility hook.
+        // window.dispatchEvent(new CustomEvent('gesture-event', { detail: { state: gestureState.value }}));
     };
 
     const calculateDistance = (p1: any, p2: any) => {
@@ -238,7 +467,10 @@ export function useGesture() {
         if (isCameraActive.value || !videoRef.value) return;
         try {
             const stream = await navigator.mediaDevices.getUserMedia({
-                video: { width: 640, height: 480, frameRate: { ideal: 30 } }
+                video: {
+                    deviceId: config.videoSource ? { exact: config.videoSource } : undefined,
+                    width: 640, height: 480, frameRate: { ideal: 30 }
+                }
             });
             videoRef.value.srcObject = stream;
             videoRef.value.onloadedmetadata = () => {
@@ -247,18 +479,17 @@ export function useGesture() {
                 isBusyRef.value = false;
                 startPredictionLoop();
             };
+            addLog(`Camera started`, 'success');
         } catch (e: any) {
             addLog(`Camera Error: ${e.message}`, 'error');
         }
     };
 
     const stopCamera = () => {
-        // Stop loop
         if (requestRef.value) {
             cancelAnimationFrame(requestRef.value);
             requestRef.value = null;
         }
-        // Stop tracks
         if (videoRef.value && videoRef.value.srcObject) {
             const stream = videoRef.value.srcObject as MediaStream;
             stream.getTracks().forEach(t => t.stop());
@@ -267,6 +498,7 @@ export function useGesture() {
         isCameraActive.value = false;
         isBusyRef.value = false;
         gestureState.value.cursor.active = false;
+        addLog('Camera stopped', 'info');
     };
 
     const startPredictionLoop = () => {
@@ -284,6 +516,7 @@ export function useGesture() {
             ) {
                 try {
                     isBusyRef.value = true;
+                    // Optimization: Do we need full res? 
                     const bitmap = await createImageBitmap(videoRef.value);
                     workerRef.value.postMessage({ type: 'detect', payload: { image: bitmap } }, [bitmap]);
                 } catch (e) {
@@ -300,6 +533,26 @@ export function useGesture() {
         workerRef.value?.terminate();
     });
 
+    // Configuration Setters
+    const setHandPreference = (h: HandPreference) => {
+        config.hand = h;
+        addLog(`Hand preference set to: ${h}`, 'info');
+    };
+    const setSmoothing = (s: SmoothingProfile) => {
+        config.smoothing = s;
+        addLog(`Smoothing profile set to: ${s}`, 'info');
+    };
+    const setRoi = (r: number) => config.roi = r;
+    const setVideoSource = (id: string) => {
+        config.videoSource = id;
+        addLog(`Video source changed. Restarting...`, 'info');
+        // Optional: Auto restart
+        if (isCameraActive.value) {
+            stopCamera();
+            startCamera();
+        }
+    };
+
     return {
         videoRef,
         canvasRef,
@@ -311,6 +564,10 @@ export function useGesture() {
         gestureState,
         initWorker,
         startCamera,
-        stopCamera
+        stopCamera,
+        setHandPreference,
+        setSmoothing,
+        setRoi,
+        setVideoSource
     };
 }
